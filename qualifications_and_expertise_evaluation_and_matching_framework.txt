@@ -1,0 +1,433 @@
+# Pseudoprocedures for determining expert qualifications and expertise match
+
+The goal is to build a systematic method for determining whether an expert's qualifications are documented, currently valid where applicable, and relevant to the specific expertise claimed—while keeping that inquiry distinct from whether the expert's particular opinion is admissible under Federal Rule of Evidence 702.
+
+A useful framework has three separate determinations:
+
+1. Existence: Does the person have the claimed degree, license, certification, employment history, publication, or experience?
+2. Match: Does the verified qualification actually support the specific expertise claimed for this case?
+3. Sufficiency: Does the expert have the specialized knowledge, skill, experience, training, or education needed for the particular opinion?
+
+The third determination is context-dependent. Under Rule 702(a), qualifications must be sufficient for the proposed testimony, but a qualification match alone does not establish that the expert's factual basis, methods, or application are reliable under Rule 702(b)–(d).
+
+## 1. Data model
+
+Represent each expert's claimed qualification and each proposed opinion as structured records.
+
+python
+
+```
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+@dataclass
+class QualificationClaim:
+    claim_id: str
+    expert_id: str
+    category: str
+    claimed_value: str
+    issuing_or_verifying_source: Optional[str] = None
+    claimed_start_date: Optional[str] = None
+    claimed_end_date: Optional[str] = None
+    jurisdiction: Optional[str] = None
+    status_claimed: Optional[str] = None
+
+@dataclass
+class EvidenceRecord:
+    evidence_id: str
+    claim_id: str
+    source_type: str
+    source_name: str
+    source_date: Optional[str]
+    supports_claim: Optional[bool]
+    contradicts_claim: Optional[bool]
+    limitations: list[str] = field(default_factory=list)
+
+@dataclass
+class ProposedOpinion:
+    opinion_id: str
+    subject: str
+    specialty_required: list[str]
+    relevant_tasks: list[str]
+    relevant_time_period: Optional[str] = None
+
+@dataclass
+class QualificationAssessment:
+    claim_id: str
+    existence_status: str
+    match_status: str
+    temporal_status: str
+    rationale: list[str]
+    unresolved_questions: list[str]
+```
+
+Use controlled status values rather than a single Boolean. For example:
+
+- Existence: `VERIFIED`, `CONTRADICTED`, `UNVERIFIED`, `CONFLICTING`.
+- Match: `MATCH`, `PARTIAL_MATCH`, `NO_MATCH`, `UNDETERMINED`.
+- Temporal status: `CURRENT`, `VALID_DURING_RELEVANT_PERIOD`, `EXPIRED`, `NOT_APPLICABLE`, `UNKNOWN`.
+
+A missing record should result in `UNVERIFIED`, not an inference that the credential does not exist.
+
+## 2. Pseudoprocedure A — Verify that a claimed qualification exists
+
+Purpose: Determine whether a claim is supported by reliable evidence, not merely repeated in a CV, expert report, website biography, or deposition.
+
+python
+
+```
+
+def verify_qualification(claim, evidence_records):
+    """
+    Returns an evidentiary status for a qualification claim.
+    Does not decide whether the qualification is legally sufficient.
+    """
+
+    relevant = [
+        e for e in evidence_records
+        if e.claim_id == claim.claim_id
+    ]
+
+    if not relevant:
+        return {
+            "status": "UNVERIFIED",
+            "reason": "No corroborating evidence located."
+        }
+
+    positive = [
+        e for e in relevant
+        if e.supports_claim is True
+    ]
+
+    negative = [
+        e for e in relevant
+        if e.contradicts_claim is True
+    ]
+
+    # Strong conflicts must not be hidden by counting sources.
+    if positive and negative:
+        return {
+            "status": "CONFLICTING",
+            "reason": "Evidence both supports and contradicts claim.",
+            "supporting_evidence": [e.evidence_id for e in positive],
+            "contradictory_evidence": [e.evidence_id for e in negative]
+        }
+
+    if negative:
+        return {
+            "status": "CONTRADICTED",
+            "reason": "Evidence contradicts the claimed qualification.",
+            "evidence": [e.evidence_id for e in negative]
+        }
+
+    if positive:
+        return {
+            "status": "VERIFIED",
+            "reason": "Supporting evidence located; assess source quality.",
+            "evidence": [e.evidence_id for e in positive]
+        }
+
+    return {
+        "status": "UNVERIFIED",
+        "reason": "Available evidence is inconclusive."
+    }
+```
+
+### Evidence hierarchy
+
+The algorithm should consider the nature of the claim when selecting evidence.
+
+| Claim type | Preferred verification evidence |
+| --- | --- |
+| Academic degree | Issuing institution's registrar or authoritative degree verification |
+| Professional license | Official licensing-board record for the relevant jurisdiction |
+| Board certification | Certification body's official records, including specialty and dates |
+| Employment or appointment | Employer confirmation, official institutional records, or reliable contemporaneous documentation |
+| Publication | Publisher's record, journal archive, DOI metadata, or the publication itself |
+| Professional experience | Contemporaneous work records, contracts, project documentation, or corroborated testimony |
+| Training course | Issuer's records showing attendance or completion and, where relevant, assessment |
+| Prior expert testimony | Court records, transcripts, and the actual scope of the testimony |
+
+These are preferred sources, not an inflexible admissibility hierarchy. A source's authority depends on the claim being tested. A university's faculty page, for example, may establish a current appointment but not necessarily the details of a degree.
+
+## 3. Pseudoprocedure B — Determine whether a qualification matches stated expertise
+
+Purpose: Establish the relationship between a verified qualification and a specific proposed opinion.
+
+The key is to compare the expert's documented capabilities with the task the expert will perform, rather than merely matching labels such as “physician,” “engineer,” or “data scientist.”
+
+python
+
+```
+
+def assess_expertise_match(verified_qualifications, proposed_opinion):
+    """
+    Qualification matching is task-specific.
+    This function produces a preliminary assessment, not a legal ruling.
+    """
+
+    required = set(proposed_opinion.specialty_required)
+    relevant_tasks = set(proposed_opinion.relevant_tasks)
+
+    if not verified_qualifications:
+        return {
+            "status": "UNDETERMINED",
+            "reason": "No verified qualifications supplied."
+        }
+
+    supported_specialties = set()
+    supported_tasks = set()
+    unresolved = []
+
+    for q in verified_qualifications:
+        if q["existence_status"] != "VERIFIED":
+            unresolved.append(
+                f"Qualification not verified: {q['claim_id']}"
+            )
+            continue
+
+        supported_specialties.update(
+            q.get("supported_specialties", [])
+        )
+        supported_tasks.update(
+            q.get("supported_tasks", [])
+        )
+
+    specialty_overlap = required & supported_specialties
+    task_overlap = relevant_tasks & supported_tasks
+
+    specialty_coverage = (
+        len(specialty_overlap) / len(required)
+        if required else None
+    )
+
+    task_coverage = (
+        len(task_overlap) / len(relevant_tasks)
+        if relevant_tasks else None
+    )
+
+    if not required and not relevant_tasks:
+        status = "UNDETERMINED"
+    elif (
+        specialty_coverage == 1.0
+        and task_coverage == 1.0
+        and not unresolved
+    ):
+        status = "MATCH"
+    elif specialty_overlap or task_overlap:
+        status = "PARTIAL_MATCH"
+    else:
+        status = "UNDETERMINED"
+
+    return {
+        "status": status,
+        "supported_specialties": sorted(specialty_overlap),
+        "supported_tasks": sorted(task_overlap),
+        "specialty_coverage": specialty_coverage,
+        "task_coverage": task_coverage,
+        "unresolved_questions": unresolved
+    }
+```
+
+Important design constraint: The coverage ratios above are descriptive measures, not legal thresholds. A 100% label match does not establish legal qualification, and a lower ratio does not automatically disqualify an expert. The required competencies must be identified from the actual opinion and the applicable legal standard.
+
+For example, a physician's verified medical degree and active medical license might establish general medical credentials. They would not, by themselves, establish expertise in epidemiological study design, toxicological dose-response analysis, or a particular specialized procedure. Additional training, experience, research, or other demonstrated knowledge may support those tasks.
+
+## 4. Pseudoprocedure C — Evaluate temporal validity
+
+Some qualifications must exist at a particular time. A license may need to have been active when a professional service was performed; a historical appointment may be relevant to work done during that appointment. Other qualifications, such as a completed degree, ordinarily remain historical facts even if the person changes jobs.
+
+python
+
+```
+
+from datetime import date
+
+def assess_temporal_validity(
+    claim,
+    relevant_start: date,
+    relevant_end: date,
+    current_date: date
+):
+    """
+    Illustrative interval logic.
+    Dates and status must be checked against authoritative records.
+    """
+
+    start = claim.get("effective_start")
+    end = claim.get("effective_end")
+    category = claim.get("category")
+
+    if category in {"degree", "completed_training"}:
+        if start is None:
+            return "UNKNOWN"
+        if start > relevant_end:
+            return "NOT_YET_OBTAINED_DURING_PERIOD"
+        return "VALID_DURING_RELEVANT_PERIOD"
+
+    if category not in {
+        "license", "certification", "appointment"
+    }:
+        return "NOT_APPLICABLE"
+
+    if start is None:
+        return "UNKNOWN"
+
+    effective_end = end or date.max
+
+    if start > relevant_end or effective_end < relevant_start:
+        return "NOT_VALID_DURING_RELEVANT_PERIOD"
+
+    if start <= relevant_start and effective_end >= relevant_end:
+        return "VALID_DURING_RELEVANT_PERIOD"
+
+    return "PARTIALLY_VALID_DURING_PERIOD"
+```
+
+This procedure only checks date intervals. It does not establish whether a license was suspended, restricted, revoked, subject to conditions, or legally necessary for the expert's proposed role. Those issues require separate verification.
+
+## 5. Pseudoprocedure D — Integrated qualification assessment
+
+This procedure combines existence, temporal validity, expertise matching, and unresolved evidence into an auditable workflow.
+
+python
+
+```
+
+def assess_expert(expert, claims, evidence, opinions):
+    results = []
+
+    for claim in claims:
+        existence = verify_qualification(claim, evidence)
+
+        results.append({
+            "claim_id": claim.claim_id,
+            "category": claim.category,
+            "claimed_value": claim.claimed_value,
+            "existence_assessment": existence["status"],
+            "existence_reason": existence["reason"],
+            "evidence": existence.get("evidence", []),
+            "limitations": [
+                limitation
+                for record in evidence
+                if record.claim_id == claim.claim_id
+                for limitation in record.limitations
+            ]
+        })
+
+    verified = [
+        result for result in results
+        if result["existence_assessment"] == "VERIFIED"
+    ]
+
+    opinion_results = []
+
+    for opinion in opinions:
+        # Map verified claims to documented capabilities.
+        relevant = map_claims_to_capabilities(
+            verified_claims=verified,
+            opinion=opinion
+        )
+
+        match = assess_expertise_match(relevant, opinion)
+
+        opinion_results.append({
+            "opinion_id": opinion.opinion_id,
+            "qualification_match": match["status"],
+            "supported_specialties":
+                match.get("supported_specialties", []),
+            "supported_tasks":
+                match.get("supported_tasks", []),
+            "unresolved_questions":
+                match.get("unresolved_questions", [])
+        })
+
+    return {
+        "expert_id": expert["expert_id"],
+        "qualification_claims": results,
+        "opinion_assessments": opinion_results,
+        "overall_legal_conclusion": "REQUIRES_CASE_SPECIFIC_REVIEW"
+    }
+```
+
+`map_claims_to_capabilities` is intentionally an external procedure. It must not automatically infer a specialty from a credential's title. It should map documented coursework, supervised practice, research, professional duties, and demonstrated experience to specific tasks, preserving the evidence for each mapping.
+
+## 6. Pseudoprocedure E — Separate qualification from admissibility
+
+A complete Rule 702 screening system must avoid conflating qualification with reliability.
+
+python
+
+```
+
+def rule_702_screening(opinion, qualification_result, record):
+    """
+    Organizes the four Rule 702 requirements.
+    The court makes the ultimate legal determination.
+    """
+
+    checks = {
+        "702a_helpfulness": evaluate_helpfulness(
+            opinion, record
+        ),
+        "702b_sufficient_facts_data": evaluate_factual_basis(
+            opinion, record
+        ),
+        "702c_reliable_methods": evaluate_methodology(
+            opinion, record
+        ),
+        "702d_reliable_application": evaluate_application(
+            opinion, record
+        )
+    }
+
+    checks["702a_helpfulness"]["qualification_context"] = (
+        qualification_result
+    )
+
+    unresolved = [
+        requirement
+        for requirement, assessment in checks.items()
+        if assessment.get("status") == "UNRESOLVED"
+    ]
+
+    return {
+        "requirement_assessments": checks,
+        "unresolved_requirements": unresolved,
+        "disposition": "JUDICIAL_DETERMINATION_REQUIRED"
+    }
+```
+
+The `evaluate_*` procedures require substantive evidence and legal analysis; they cannot be reliably implemented as simple keyword searches. Under Rule 702, the proponent must establish each applicable requirement by a preponderance of the evidence.
+
+## 7. Quality controls and auditability
+
+Before using the results in litigation, apply these controls:
+
+- Provenance: Preserve the source, retrieval date, relevant passage, and identity of the qualification claim for every evidentiary finding.
+- Contradiction handling: Keep conflicting evidence visible. Do not allow multiple weak sources to outweigh a directly relevant authoritative record merely because they are more numerous.
+- Temporal accuracy: Distinguish the current status of a credential from its status at the time relevant to the opinion.
+- Scope discipline: Evaluate each proposed opinion separately. An expert may be qualified for one opinion but not another.
+- Uncertainty preservation: Do not convert missing information into a negative finding or a probabilistic score into a legal conclusion.
+- Human review: Require a reviewer to examine disputed mappings, ambiguous credentials, jurisdiction-specific licensing requirements, and the ultimate Rule 702 implications.
+
+## 8. Suggested final output schema
+
+For each proposed opinion, the system should generate an evidence-linked report with the following fields.
+
+| Field | Meaning |
+| --- | --- |
+| `claim_existence` | Verified, contradicted, unverified, or conflicting |
+| `temporal_validity` | Valid for the relevant period, invalid, partial, unknown, or not applicable |
+| `expertise_match` | Match, partial match, no match, or undetermined |
+| `supporting_evidence` | Sources and passages supporting the assessment |
+| `contrary_evidence` | Sources and passages inconsistent with the claim |
+| `unresolved_questions` | Missing records or disputed factual issues |
+| `rule_702a_assessment` | Preliminary assessment of qualifications and helpfulness |
+| `rule_702b_assessment` | Preliminary assessment of factual sufficiency |
+| `rule_702c_assessment` | Preliminary assessment of methodological reliability |
+| `rule_702d_assessment` | Preliminary assessment of reliable application |
+| `reviewer_conclusion` | Reasoned human determination with supporting record citations |
+
+Recommended operating principle: Automate the verification workflow and evidence organization, but not the ultimate legal conclusion. The system should establish what is documented, identify what remains uncertain, and explain how verified qualifications relate to each proposed opinion. It should not declare an expert legally admissible—or inadmissible—solely from credentials, specialty labels, or a numerical match score.
